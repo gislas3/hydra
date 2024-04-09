@@ -1,0 +1,137 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hydra
+  namespace: production
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hydra
+  labels:
+    app: hydra
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hydra
+  template:
+    metadata:
+      labels:
+        app: hydra
+      annotations:
+        vault.security.banzaicloud.io/vault-addr: "https://vault.vault:8200"
+        vault.security.banzaicloud.io/vault-role: "applications"
+        vault.security.banzaicloud.io/vault-tls-secret: "vault-tls"
+        prometheus.io/port: "8000"
+        prometheus.io/scrape: "true"
+    spec:
+      imagePullSecrets:
+        - name: gitlab-registry
+      volumes:
+      - name: root-cert
+        secret:
+          secretName: root-cert
+      containers:
+        - name: hydra
+          image: registry.mobilizedconstruction.com/mc/hydra:latest
+          volumeMounts:
+          - name: root-cert
+            mountPath: "/secrets"
+            readOnly: true
+          imagePullPolicy: Always
+          livenessProbe:
+            httpGet:
+              path: /api/healthcheck/
+              port: 8000
+              httpHeaders:
+              - name: Host
+                value: hydra.mobilizedconstruction.com
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          ports:
+            - containerPort: 8000
+          env:
+            - name: DJANGO_LOG_LEVEL
+              value: 'DEBUG'
+            - name: POSTGRES_HOST
+              value: 'hydra-db'
+            - name: POSTGRES_USER
+              value: 'hydra-db'
+            - name: POSTGRES_PASSWORD
+              value: vault:internal/data/hydra#postgres_password
+            - name: DJANGO_ALLOWED_HOSTS
+              value: "hydra.mobilizedconstruction.com"
+            - name: HOUSTON_TOKEN
+              value: vault:internal/data/hydra#HOUSTON_TOKEN
+            - name: WATCH_K8S
+              value: "True"
+            - name: WATCH_K8S_NAMESPACE
+              value: "processing"
+            - name: MAX_ACTIVE_K8S_JOBS
+              value: "100"
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: hydra
+  labels:
+    app: hydra
+spec:
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+  selector:
+    app: hydra
+---
+# Ingress is used to define the public endpoint, the HTTPS/TLS certificate and routing rules.
+# Note that an Ingress is not needed if your service only needs to be called by other internal services in the cluster.
+kind: Ingress
+apiVersion: networking.k8s.io/v1
+metadata:
+  name: hydra
+  namespace: production
+  annotations:
+    # This line is required!
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    kubernetes.io/ingress.class: internal
+spec:
+  tls:
+  - hosts:
+    - hydra.mobilizedconstruction.com
+    secretName: hydra-mc-com-tls
+  # These are the routing rules. Only requests going to 'subdomain.mobilizedconstruction.com' are routed to 'my-service'.
+  rules:
+  - host: hydra.mobilizedconstruction.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: hydra
+            port:
+              number: 8000
+---
+apiVersion: cert-manager.io/v1alpha2
+kind: Certificate
+metadata:
+  name: hydra-mc-com
+  namespace: production
+spec:
+  # Secret names are always required.
+  secretName: hydra-mc-com-tls
+  duration: 2160h # 90d
+  renewBefore: 360h # 15d
+  keySize: 2048
+  keyAlgorithm: rsa
+  keyEncoding: pkcs1
+  organization:
+  - Mobilized Construction Ltd.
+  dnsNames:
+  - hydra.mobilizedconstruction.com
+  issuerRef:
+    name: internal-issuer
+    kind: ClusterIssuer
+    group: cert-manager.io

@@ -1,0 +1,84 @@
+# You can override the included template(s) by including variable overrides
+# SAST customization: https://docs.gitlab.com/ee/user/application_security/sast/#customizing-the-sast-settings
+# Secret Detection customization: https://docs.gitlab.com/ee/user/application_security/secret_detection/#customizing-settings
+# Dependency Scanning customization: https://docs.gitlab.com/ee/user/application_security/dependency_scanning/#customizing-the-dependency-scanning-settings
+# Note that environment variables can be set in several places
+# See https://docs.gitlab.com/ee/ci/variables/#cicd-variable-precedence
+image: docker:19-stable
+variables:
+  DOCKER_HOST: tcp://docker:2375/
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: ''
+  GIT_SUBMODULE_STRATEGY: recursive
+services:
+- docker:19-dind
+include:
+- project: mc/ci-templates
+  file: deployment.yml
+- template: Security/SAST.gitlab-ci.yml
+stages:
+- test
+- build
+- deploy
+workflow:
+  rules:
+  - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  - if: "$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS"
+    when: never
+  - if: "$CI_COMMIT_BRANCH"
+production:
+  stage: build
+  before_script:
+  - docker info
+  - echo $CI_REGISTRY_PASSWORD | docker login -u $CI_REGISTRY_USER --password-stdin
+    $CI_REGISTRY
+  variables:
+    CI_DEBUG_TRACE: 'true'
+  rules:
+  - if: "$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH"
+  image: docker:latest
+  script:
+  - docker pull $CI_REGISTRY_IMAGE:latest || true
+  - docker build --build-arg RUN_ENVIRONMENT=production --cache-from $CI_REGISTRY_IMAGE:latest
+    --tag $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA --tag $CI_REGISTRY_IMAGE:latest -f Dockerfile
+    .
+  - docker push $CI_REGISTRY_IMAGE:latest
+unit_test:
+  stage: test
+  image: python:3
+  script:
+  - pip install -r requirements.txt
+  - python manage.py test --settings=hydra.settings.test
+integration_test:
+  stage: test
+  image: python:3.8
+  variables:
+    CI_DEBUG_TRACE: 'true'
+  rules:
+  - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  - if: "$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH"
+  script:
+  - pip install -r requirements.txt
+  - python manage.py test --settings=hydra.settings.test --pattern="int_test_*.py"
+thread_integration_test:
+  stage: test
+  image: python:3.8
+  variables:
+    CI_DEBUG_TRACE: 'true'
+    WATCH_K8S: 'True'
+    WATCH_K8S_NAMESPACE: "processing-test"
+  rules:
+  - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  - if: "$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH"
+  script:
+  - pip install -r requirements.txt
+  - python manage.py test --settings=hydra.settings.test --pattern="int_thread_test_*.py"
+
+deploy-to-production-latest:
+  extends: ".deploy-production-latest"
+  variables:
+    DEPLOYMENT_URL: https://hydra.mobilizedconstruction.com
+    DEPLOYMENT_KIND: deployment
+    DEPLOYMENT_NAME: hydra
+sast:
+  stage: test

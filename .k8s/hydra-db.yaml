@@ -1,0 +1,87 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hydra-db-scripts
+  labels:
+    app: hydra-db
+data:
+  entrypoint: |
+    #!/bin/bash
+    docker-entrypoint.sh postgres
+    psql -U hydra-db -c "ALTER ROLE hydra-db WITH PASSWORD '$POSTGRES_PASSWORD'"
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: hydra-db
+  labels:
+    app: hydra-db
+    kubernetes.io/cluster-service: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hydra-db
+  serviceName: hydra-db
+  template:
+    metadata:
+      labels:
+        app: hydra-db
+        kubernetes.io/cluster-service: "true"
+      annotations:
+        vault.security.banzaicloud.io/mutate-configmap: "true"
+        vault.security.banzaicloud.io/vault-addr: "https://vault.vault:8200"
+        vault.security.banzaicloud.io/vault-role: "applications"
+        vault.security.banzaicloud.io/vault-tls-secret: "vault-tls"
+    spec:
+      containers:
+        - name: hydra-db
+          image: postgres:13.3-alpine
+          command: ["/bin/bash", "/scripts/entrypoint"]
+          env:
+          - name: POSTGRES_DB
+            value: hydra-db
+          - name: POSTGRES_USER
+            value: hydra-db
+          - name: POSTGRES_PASSWORD
+            value: vault:internal/data/hydra#postgres_password
+          ports:
+            - containerPort: 5432
+              name: postgresdb
+              protocol: TCP
+          volumeMounts:
+            - name: hydra-postgres-data
+              mountPath: /var/lib/postgresql/data
+              subPath: postgres-data
+            - name: hydra-db-scripts
+              mountPath: /scripts
+      volumes:
+        - name: hydra-db-scripts
+          configMap:
+            name: hydra-db-scripts
+  volumeClaimTemplates:
+  - metadata:
+      name: hydra-postgres-data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: standard-consumer-first-v2
+      resources:
+        requests:
+          storage: 10Gi            
+---
+# Postgres service
+apiVersion: v1
+kind: Service
+metadata:
+  name: hydra-db
+  labels:
+    app: hydra-db
+    addonmanager.kubernetes.io/mode: Reconcile
+    kubernetes.io/name: "hydra-db"
+spec:
+  ports:
+  - port: 5432
+    protocol: TCP
+    targetPort: postgresdb
+  selector:
+    app: hydra-db
